@@ -52,7 +52,8 @@ impl FlicClient {
             let mut reader = self.reader.lock().await;
             if let Ok(size) = poll_fn(|cx| {
                 let mut buf = [0; 1];
-                match reader.poll_peek(cx, &mut buf) {
+                let mut read_buf = ReadBuf::new(&mut buf);
+                match reader.poll_peek(cx, &mut read_buf) {
                     Poll::Pending => Poll::Ready(Ok(0_usize)),
                     Poll::Ready(all) => Poll::Ready(all),
                 }
