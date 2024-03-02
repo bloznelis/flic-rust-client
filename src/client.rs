@@ -1,5 +1,3 @@
-use futures::future::poll_fn;
-use futures::task::Poll;
 use tokio::io::*;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
@@ -10,9 +8,6 @@ use super::commands::Command;
 use super::events::stream_mapper::*;
 use super::events::Event;
 
-type EventClosure = dyn FnMut(&Event) + Sync + Send + 'static;
-type EventClosureMutex = Box<EventClosure>;
-
 pub fn event_handler<F>(f: F) -> EventClosureMutex
 where
     F: FnMut(&Event) + Sync + Send + 'static,
@@ -20,13 +15,16 @@ where
     Box::new(f)
 }
 
+type EventClosure = dyn FnMut(&Event) + Sync + Send + 'static;
+type EventClosureMutex = Box<EventClosure>;
+
 pub struct FlicClient {
     reader: Mutex<OwnedReadHalf>,
     writer: Mutex<OwnedWriteHalf>,
     is_running: Mutex<bool>,
     command_mapper: Mutex<CommandToByteMapper>,
     event_mapper: Mutex<ByteToEventMapper>,
-    map: Mutex<Vec<EventClosureMutex>>,
+    handlers: Mutex<Vec<EventClosureMutex>>,
 }
 
 impl FlicClient {
@@ -40,46 +38,49 @@ impl FlicClient {
                 is_running: Mutex::new(true),
                 command_mapper: Mutex::new(CommandToByteMapper::new()),
                 event_mapper: Mutex::new(ByteToEventMapper::new()),
-                map: Mutex::new(vec![]),
+                handlers: Mutex::new(vec![]),
             })
     }
     pub async fn register_event_handler(self, event: EventClosureMutex) -> Self {
-        self.map.lock().await.push(event);
+        self.handlers.lock().await.push(event);
         self
     }
+
     pub async fn listen(&self) {
         while *self.is_running.lock().await {
             let mut reader = self.reader.lock().await;
-            if let Ok(size) = poll_fn(|cx| {
-                let mut buf = [0; 1];
-                let mut read_buf = ReadBuf::new(&mut buf);
-                match reader.poll_peek(cx, &mut read_buf) {
-                    Poll::Pending => Poll::Ready(Ok(0_usize)),
-                    Poll::Ready(all) => Poll::Ready(all),
-                }
-            })
-            .await
-            {
-                if size > 0 {
-                    let mut buffer = vec![];
-                    if let Some(_) = reader.read_buf(&mut buffer).await.ok() {
-                        for b in buffer.iter() {
-                            match self.event_mapper.lock().await.map(*b) {
-                                EventResult::Some(Event::NoOp) => {}
-                                EventResult::Some(event) => {
-                                    let mut map = self.map.lock().await;
-                                    for ref mut f in &mut *map {
-                                        f(&event);
-                                    }
-                                }
-                                _ => {}
+            let mut buffer = vec![0; 2048];
+
+            let size = reader.read(&mut buffer).await;
+
+            match size {
+                Ok(size) if size > 0 => {
+                    buffer.truncate(size);
+                    for b in buffer.iter() {
+                        match self.event_mapper.lock().await.map(*b) {
+                            EventResult::Some(Event::NoOp) => { }
+                            EventResult::Some(event) => {
+                                self.handlers
+                                    .lock()
+                                    .await
+                                    .iter_mut()
+                                    .for_each(|handler| handler(&event))
                             }
+                            _ => {}
                         }
                     }
+                }
+                Ok(_) => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
+                Err(e) => {
+                    eprintln!("Error reading from reader: {}", e);
+                    break;
                 }
             }
         }
     }
+
     pub async fn stop(&self) {
         *self.is_running.lock().await = false;
     }

@@ -5,7 +5,7 @@ license = "MIT"
 license-file = "LICENSE.md"
 readme = "README.md"
 repository = "https://github.com/bloznelis/flic-rust-client"
-version = "0.2.0"
+version = "0.4.0"
 authors = ["Lukas Bloznelis <lukas.bloznelis@gmail.com>"]
 edition = "2021"
 
